@@ -59,6 +59,7 @@ const Instance = struct {
     get_physical_device_queue_family_properties: std.meta.Child(c.PFN_vkGetPhysicalDeviceQueueFamilyProperties),
     create_device: std.meta.Child(c.PFN_vkCreateDevice),
     get_device_proc_addr: std.meta.Child(c.PFN_vkGetDeviceProcAddr),
+    get_physical_device_properties: std.meta.Child(c.PFN_vkGetPhysicalDeviceProperties),
 
     fn init(entry: Entry, allocation_callbacks: ?*c.VkAllocationCallbacks) !Self {
         const extensions = [_][*:0]const u8{c.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME};
@@ -78,6 +79,7 @@ const Instance = struct {
                 .get_physical_device_queue_family_properties = load("vkGetPhysicalDeviceQueueFamilyProperties", entry.get_instance_proc_addr, instance),
                 .create_device = load("vkCreateDevice", entry.get_instance_proc_addr, instance),
                 .get_device_proc_addr = load("vkGetDeviceProcAddr", entry.get_instance_proc_addr, instance),
+                .get_physical_device_properties = load("vkGetPhysicalDeviceProperties", entry.get_instance_proc_addr, instance),
             },
             c.VK_ERROR_OUT_OF_HOST_MEMORY => error.OutOfHostMemory,
             c.VK_ERROR_OUT_OF_DEVICE_MEMORY => error.OutOfDeviceMemory,
@@ -210,6 +212,43 @@ const Context = struct {
         self.instance.deinit();
         self.entry.deinit();
     }
+
+    const PhysicalDevicesIterator = struct {
+        index: usize = 0,
+        physical_devices: []const c.VkPhysicalDevice,
+        allocator: std.mem.Allocator,
+
+        fn init(context: Context, allocator: std.mem.Allocator) !PhysicalDevicesIterator {
+            return .{
+                .physical_devices = try context.instance.get_physical_devices(allocator),
+                .allocator = allocator,
+            };
+        }
+
+        fn deinit(self: PhysicalDevicesIterator) void {
+            self.allocator.free(self.physical_devices);
+        }
+
+        fn next(self: *PhysicalDevicesIterator) ?c.VkPhysicalDevice {
+            if (self.index >= self.physical_devices.len)
+                return null;
+            defer self.index += 1;
+            return self.physical_devices[self.index];
+        }
+    };
+
+    fn dump_physical_device_properties(self: Self, allocator: std.mem.Allocator, writer: anytype) !void {
+        var iter = try PhysicalDevicesIterator.init(self, allocator);
+        defer iter.deinit();
+        while (iter.next()) |physical_device| {
+            var physical_properties: c.VkPhysicalDeviceProperties = undefined;
+            self.instance.get_physical_device_properties(physical_device, &physical_properties);
+            try writer.print("----- Device {} -----\n", .{iter.index});
+            try writer.print("Name:           {s}\n", .{physical_properties.deviceName});
+            try writer.print("Type:           {}\n", .{physical_properties.deviceType});
+            try writer.print("Driver Version: {}\n", .{physical_properties.driverVersion});
+        }
+    }
 };
 
 pub fn main() !void {
@@ -218,4 +257,7 @@ pub fn main() !void {
 
     var context = try Context.init(allocator);
     defer context.deinit();
+    const stdout = std.io.getStdOut().writer();
+
+    try context.dump_physical_device_properties(allocator, stdout);
 }
