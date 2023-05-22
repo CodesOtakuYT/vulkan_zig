@@ -1,0 +1,2 @@
+#! /bin/sh
+zig translate-c cimports.h -lc > src/c.zig
