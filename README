@@ -1,0 +1,12 @@
+Vulkan application made using the zig programming language
+Being made in a livestream:
+https://youtu.be/Kf7BIPUUfsc
+## Build Instructions
+1 - Translate c imports:
+```sh
+./translate_cimports
+```
+2 - Build:
+```sh
+zig build run
+```
