@@ -1,13 +1,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c.zig");
+const shader = @embedFile("res/shaders/simple.spv");
 
 fn GetFunctionPointer(comptime name: []const u8) type {
     return std.meta.Child(@field(c, "PFN_" ++ name));
 }
 
-fn lookup(library: *std.DynLib, comptime name: [:0]const u8) GetFunctionPointer(name) {
-    return library.lookup(GetFunctionPointer(name), name).?;
+fn lookup(library: *std.DynLib, comptime name: [:0]const u8) !GetFunctionPointer(name) {
+    return library.lookup(GetFunctionPointer(name), name) orelse error.SymbolNotFound;
 }
 
 fn load(comptime name: []const u8, proc_addr: anytype, handle: anytype) GetFunctionPointer(name) {
@@ -35,7 +36,7 @@ const Entry = struct {
 
     fn init() !Self {
         var library = try load_library(LibraryNames);
-        const get_instance_proc_addr = lookup(&library, "vkGetInstanceProcAddr");
+        const get_instance_proc_addr = try lookup(&library, "vkGetInstanceProcAddr");
         const create_instance = load("vkCreateInstance", get_instance_proc_addr, null);
         return .{
             .handle = library,
@@ -121,6 +122,7 @@ const Instance = struct {
             var count: u32 = undefined;
             self.get_physical_device_queue_family_properties(physical_device, &count, null);
             var queue_family_properties = try allocator.alloc(c.VkQueueFamilyProperties, count);
+            self.get_physical_device_queue_family_properties(physical_device, &count, queue_family_properties.ptr);
             defer allocator.free(queue_family_properties);
             for (queue_family_properties, 0..) |queue_family_property, queue_family_index| {
                 if (queue_family_property.queueFlags & queue_flags == queue_flags) {
@@ -136,6 +138,77 @@ const Instance = struct {
     }
 };
 
+const PhysicalDeviceType = enum(u32) {
+    other,
+    integrated_gpu,
+    discrete_gpu,
+    virtual_gpu,
+    cpu,
+
+    fn init(number: u32) @This() {
+        return @intToEnum(@This(), number);
+    }
+
+    fn name(self: @This()) [:0]const u8 {
+        return @tagName(self);
+    }
+};
+
+const Version = struct {
+    major: u32,
+    minor: u32,
+    patch: u32,
+
+    fn init(number: u32) @This() {
+        return .{
+            .major = c.VK_API_VERSION_MAJOR(number),
+            .minor = c.VK_API_VERSION_MINOR(number),
+            .patch = c.VK_API_VERSION_PATCH(number),
+        };
+    }
+
+    fn unpack(self: @This()) struct { u32, u32, u32 } {
+        return .{ self.major, self.minor, self.patch };
+    }
+};
+
+const PhysicalDevicePropertiesIterator = struct {
+    const Self = @This();
+
+    index: usize = 0,
+    physical_devices: []const c.VkPhysicalDevice,
+    instance: Instance,
+
+    fn init(instance: Instance, physical_devices: []const c.VkPhysicalDevice) !Self {
+        return .{
+            .physical_devices = physical_devices,
+            .instance = instance,
+        };
+    }
+
+    fn next(self: *Self) ?c.VkPhysicalDeviceProperties {
+        if (self.index >= self.physical_devices.len)
+            return null;
+        defer self.index += 1;
+        var physical_properties: c.VkPhysicalDeviceProperties = undefined;
+        self.instance.get_physical_device_properties(self.physical_devices[self.index], &physical_properties);
+        return physical_properties;
+    }
+
+    fn dump(self: *Self, writer: anytype) !void {
+        while (self.next()) |physical_device_properties| {
+            const device_type = PhysicalDeviceType.init(physical_device_properties.deviceType).name();
+            const device_name = physical_device_properties.deviceName;
+            const driver_version = physical_device_properties.driverVersion;
+
+            try writer.print("----- Device {} -----\n", .{self.index});
+            try writer.print("Name:           {s}\n", .{device_name});
+            try writer.print("Type:           {s}\n", .{device_type});
+            try writer.print("Driver Version: {}\n", .{driver_version});
+        }
+    }
+};
+
 const QueueFamily = struct {
     physical_device: c.VkPhysicalDevice,
     queue_family_index: u32,
@@ -147,7 +220,16 @@ const Device = struct {
     allocation_callbacks: ?*c.VkAllocationCallbacks,
     destroy_device: std.meta.Child(c.PFN_vkDestroyDevice),
 
-    fn init(instance: Instance, queue_family: QueueFamily, allocation_callbacks: ?*c.VkAllocationCallbacks) !Device {
+    create_shader_module: std.meta.Child(c.PFN_vkCreateShaderModule),
+    destroy_shader_module: std.meta.Child(c.PFN_vkDestroyShaderModule),
+
+    create_pipeline_layout: std.meta.Child(c.PFN_vkCreatePipelineLayout),
+    destroy_pipeline_layout: std.meta.Child(c.PFN_vkDestroyPipelineLayout),
+
+    create_compute_pipelines: std.meta.Child(c.PFN_vkCreateComputePipelines),
+    destroy_pipeline: std.meta.Child(c.PFN_vkDestroyPipeline),
+
+    fn init(instance: Instance, queue_family: QueueFamily, allocation_callbacks: ?*c.VkAllocationCallbacks) !Self {
         const queue_priorities = [_]f32{1.0};
         const queue_create_infos = [_]c.VkDeviceQueueCreateInfo{.{
             .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -169,6 +251,12 @@ const Device = struct {
                 .handle = device,
                 .allocation_callbacks = allocation_callbacks,
                 .destroy_device = load("vkDestroyDevice", instance.get_device_proc_addr, device),
+                .create_shader_module = load("vkCreateShaderModule", instance.get_device_proc_addr, device),
+                .destroy_shader_module = load("vkDestroyShaderModule", instance.get_device_proc_addr, device),
+                .create_pipeline_layout = load("vkCreatePipelineLayout", instance.get_device_proc_addr, device),
+                .destroy_pipeline_layout = load("vkDestroyPipelineLayout", instance.get_device_proc_addr, device),
+                .create_compute_pipelines = load("vkCreateComputePipelines", instance.get_device_proc_addr, device),
+                .destroy_pipeline = load("vkDestroyPipeline", instance.get_device_proc_addr, device),
             },
             c.VK_ERROR_OUT_OF_HOST_MEMORY => error.OutOfHostMemory,
             c.VK_ERROR_OUT_OF_DEVICE_MEMORY => error.OutOfDeviceMemory,
@@ -198,7 +286,7 @@ const Context = struct {
         const instance = try Instance.init(entry, null);
         const physical_devices = try instance.get_physical_devices(allocator);
         defer allocator.free(physical_devices);
-        const queue_family = (try instance.select_queue_family(physical_devices, allocator, c.VK_QUEUE_COMPUTE_BIT)).?;
+        const queue_family = (try instance.select_queue_family(physical_devices, allocator, c.VK_QUEUE_COMPUTE_BIT)) orelse return error.NoSuitableQueueFamily;
         const device = try Device.init(instance, queue_family, null);
         return .{
             .entry = entry,
@@ -212,52 +300,119 @@ const Context = struct {
         self.instance.deinit();
         self.entry.deinit();
     }
+};
 
-    const PhysicalDevicesIterator = struct {
-        index: usize = 0,
-        physical_devices: []const c.VkPhysicalDevice,
-        allocator: std.mem.Allocator,
+const ShaderModule = struct {
+    const Self = @This();
 
-        fn init(context: Context, allocator: std.mem.Allocator) !PhysicalDevicesIterator {
-            return .{
-                .physical_devices = try context.instance.get_physical_devices(allocator),
-                .allocator = allocator,
-            };
-        }
+    device: Device,
+    allocation_callbacks: ?*c.VkAllocationCallbacks,
 
-        fn deinit(self: PhysicalDevicesIterator) void {
-            self.allocator.free(self.physical_devices);
-        }
+    handle: c.VkShaderModule,
 
-        fn next(self: *PhysicalDevicesIterator) ?c.VkPhysicalDevice {
-            if (self.index >= self.physical_devices.len)
-                return null;
-            defer self.index += 1;
-            return self.physical_devices[self.index];
-        }
-    };
+    fn init(device: Device, allocation_callbacks: ?*c.VkAllocationCallbacks, code: []const u8) !Self {
+        // TODO: isAligned or isAlignedLog2?
+        if (!std.mem.isAligned(@ptrToInt(code.ptr), 4)) return error.BadAlignment;
+        const info = c.VkShaderModuleCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .codeSize = code.len,
+            .pCode = @ptrCast([*c]const u32, @alignCast(4, shader)),
+        };
+        var module: c.VkShaderModule = undefined;
+        return switch (device.create_shader_module(device.handle, &info, allocation_callbacks, &module)) {
+            c.VK_SUCCESS => .{
+                .device = device,
+                .handle = module,
+                .allocation_callbacks = allocation_callbacks,
+            },
+            c.VK_ERROR_OUT_OF_HOST_MEMORY => error.OutOfHostMemory,
+            c.VK_ERROR_OUT_OF_DEVICE_MEMORY => error.OutOfDeviceMemory,
+            c.VK_ERROR_INVALID_SHADER_NV => error.InvalidShader,
+            else => unreachable,
+        };
+    }
 
-    fn dump_physical_device_properties(self: Self, allocator: std.mem.Allocator, writer: anytype) !void {
-        var iter = try PhysicalDevicesIterator.init(self, allocator);
-        defer iter.deinit();
-        while (iter.next()) |physical_device| {
-            var physical_properties: c.VkPhysicalDeviceProperties = undefined;
-            self.instance.get_physical_device_properties(physical_device, &physical_properties);
-            try writer.print("----- Device {} -----\n", .{iter.index});
-            try writer.print("Name:           {s}\n", .{physical_properties.deviceName});
-            try writer.print("Type:           {}\n", .{physical_properties.deviceType});
-            try writer.print("Driver Version: {}\n", .{physical_properties.driverVersion});
-        }
+    fn deinit(self: Self) void {
+        self.device.destroy_shader_module(self.device.handle, self.handle, self.allocation_callbacks);
     }
 };
 
+const PipelineLayout = struct {
+    const Self = @This();
+
+    device: Device,
+    allocation_callbacks: ?*c.VkAllocationCallbacks,
+
+    handle: c.VkPipelineLayout,
+
+    fn init(device: Device, allocation_callbacks: ?*c.VkAllocationCallbacks) !Self {
+        const info = std.mem.zeroInit(c.VkPipelineLayoutCreateInfo, .{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        });
+        var pipeline_layout: c.VkPipelineLayout = undefined;
+        return switch (device.create_pipeline_layout(device.handle, &info, allocation_callbacks, &pipeline_layout)) {
+            c.VK_SUCCESS => .{
+                .device = device,
+                .allocation_callbacks = allocation_callbacks,
+                .handle = pipeline_layout,
+            },
+            c.VK_ERROR_OUT_OF_HOST_MEMORY => error.OutOfHostMemory,
+            c.VK_ERROR_OUT_OF_DEVICE_MEMORY => error.OutOfDeviceMemory,
+            else => unreachable,
+        };
+    }
+
+    fn deinit(self: Self) void {
+        self.device.destroy_pipeline_layout(self.device.handle, self.handle, self.allocation_callbacks);
+    }
+};
+
+// const ComputePipeline = struct {
+//     const Self = @This();
+
+//     device: Device,
+//     allocation_callbacks: ?*c.VkAllocationCallbacks,
+
+//     handle: c.VkPipeline,
+
+//     fn init(device: Device, allocator: std.mem.Allocator, shader_modules: []ShaderModule, allocation_callbacks: ?*c.VkAllocationCallbacks) ![]Self {
+//         const shader_stage = c.VkPipelineShaderStageCreateInfo{
+//             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+//             .flags = 0,
+//             .stage = c.VK_SHADER_STAGE_COMPUTE_BIT,
+//             .module = shader_module.handle,
+//             .pName = "main",
+//             .pSpecializationInfo = null,
+//         };
+//         const infos = allocator.alloc(c.VkComputePipelineCreateInfo, shader_modules.len);
+//         defer allocator.free(infos);
+//         return switch(device.create_compute_pipelines(device.handle, null, infos.len, &infos, allocation_callbacks, &pipelines)) {
+//             c.VK_SUCCESS => .{
+//                 .device = device,
+//                 .allocation_callbacks = allocation_callbacks,
+//                 .
+//             }
+//         };
+//     }
+
+//     fn deinit(self: Self) void {
+//         self.device.destroy_pipeline(self.device.handle, self.handle, self.allocation_callbacks);
+//     }
+// };
+
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(general_purpose_allocator.deinit() == .ok);
     const allocator = general_purpose_allocator.allocator();
 
     var context = try Context.init(allocator);
     defer context.deinit();
-    const stdout = std.io.getStdOut().writer();
 
-    try context.dump_physical_device_properties(allocator, stdout);
+    const pipeline_layout = try PipelineLayout.init(context.device, null);
+    defer pipeline_layout.deinit();
+
+    const shader_module = try ShaderModule.init(context.device, null, shader[0..]);
+    defer shader_module.deinit();
 }
