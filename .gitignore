@@ -1,4 +1,4 @@
 zig-cache
 zig-out
 src/c.zig
-src/res/shaders/*
+src/res/shaders

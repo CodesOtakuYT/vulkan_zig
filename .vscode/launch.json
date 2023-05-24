@@ -11,6 +11,17 @@
             "program": "${workspaceFolder}/zig-out/bin/vulkan_zig",
             "args": [],
             "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug Prebuild",
+            "program": "zig",
+            "args": [
+                "run",
+                "prebuild.zig"
+            ],
+            "cwd": "${workspaceFolder}"
         }
     ]
 }

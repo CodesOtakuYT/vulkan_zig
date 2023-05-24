@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c.zig");
-const shader = @embedFile("res/shaders/simple.spv");
+const shader = @embedFile("res/shaders/simple.comp.spv");
 
 fn GetFunctionPointer(comptime name: []const u8) type {
     return std.meta.Child(@field(c, "PFN_" ++ name));
@@ -120,6 +120,7 @@ const Instance = struct {
     fn select_queue_family(self: Self, physical_devices: []c.VkPhysicalDevice, allocator: std.mem.Allocator, queue_flags: u32) !?QueueFamily {
         for (physical_devices) |physical_device| {
             var count: u32 = undefined;
+
             self.get_physical_device_queue_family_properties(physical_device, &count, null);
             var queue_family_properties = try allocator.alloc(c.VkQueueFamilyProperties, count);
             self.get_physical_device_queue_family_properties(physical_device, &count, queue_family_properties.ptr);
@@ -151,24 +152,6 @@ const PhysicalDeviceType = enum(u32) {
 
     fn name(self: @This()) [:0]const u8 {
         return @tagName(self);
-    }
-};
-
-const Version = struct {
-    major: u32,
-    minor: u32,
-    patch: u32,
-
-    fn init(number: u32) @This() {
-        return .{
-            .major = c.VK_API_VERSION_MAJOR(number),
-            .minor = c.VK_API_VERSION_MINOR(number),
-            .patch = c.VK_API_VERSION_PATCH(number),
-        };
-    }
-
-    fn unpack(self: @This()) struct { u32, u32, u32 } {
-        return .{ self.major, self.minor, self.patch };
     }
 };
 
@@ -276,6 +259,8 @@ const Device = struct {
 
 const Context = struct {
     const Self = @This();
+    const max_stack_physical_devices = 4;
+    const max_stack_queue_families = 8;
 
     entry: Entry,
     instance: Instance,
@@ -284,9 +269,16 @@ const Context = struct {
     fn init(allocator: std.mem.Allocator) !Self {
         var entry = try Entry.init();
         const instance = try Instance.init(entry, null);
-        const physical_devices = try instance.get_physical_devices(allocator);
-        defer allocator.free(physical_devices);
-        const queue_family = (try instance.select_queue_family(physical_devices, allocator, c.VK_QUEUE_COMPUTE_BIT)) orelse return error.NoSuitableQueueFamily;
+
+        var phyical_devices_stack_fallback = std.heap.stackFallback(max_stack_physical_devices * @sizeOf(c.VkPhysicalDevice), allocator);
+        const phyical_devices_stack_fallback_allocator = phyical_devices_stack_fallback.get();
+        const physical_devices = try instance.get_physical_devices(phyical_devices_stack_fallback_allocator);
+        defer phyical_devices_stack_fallback_allocator.free(physical_devices);
+
+        var queue_family_properties_stack_fallback = std.heap.stackFallback(max_stack_queue_families * @sizeOf(c.VkQueueFamilyProperties), allocator);
+        const queue_family_properties_stack_fallback_allocator = queue_family_properties_stack_fallback.get();
+        const queue_family = (try instance.select_queue_family(physical_devices, queue_family_properties_stack_fallback_allocator, c.VK_QUEUE_COMPUTE_BIT)) orelse return error.NoSuitableQueueFamily;
+
         const device = try Device.init(instance, queue_family, null);
         return .{
             .entry = entry,
@@ -403,7 +395,9 @@ const PipelineLayout = struct {
 // };
 
 pub fn main() !void {
-    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{
+        .verbose_log = true,
+    }){};
     defer std.debug.assert(general_purpose_allocator.deinit() == .ok);
     const allocator = general_purpose_allocator.allocator();
 
