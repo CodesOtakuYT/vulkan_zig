@@ -1,3 +1,0 @@
-#! /bin/sh
-mkdir -p src/res/shaders
-glslc dev/shaders/simple.comp -o src/res/shaders/simple.spv
