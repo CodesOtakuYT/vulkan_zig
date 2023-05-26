@@ -209,6 +209,10 @@ const Device = struct {
     create_pipeline_layout: std.meta.Child(c.PFN_vkCreatePipelineLayout),
     destroy_pipeline_layout: std.meta.Child(c.PFN_vkDestroyPipelineLayout),
 
+    create_pipeline_cache: std.meta.Child(c.PFN_vkCreatePipelineCache),
+    destroy_pipeline_cache: std.meta.Child(c.PFN_vkDestroyPipelineCache),
+    get_pipeline_cache_data: std.meta.Child(c.PFN_vkGetPipelineCacheData),
+
     create_compute_pipelines: std.meta.Child(c.PFN_vkCreateComputePipelines),
     destroy_pipeline: std.meta.Child(c.PFN_vkDestroyPipeline),
 
@@ -238,6 +242,9 @@ const Device = struct {
                 .destroy_shader_module = load("vkDestroyShaderModule", instance.get_device_proc_addr, device),
                 .create_pipeline_layout = load("vkCreatePipelineLayout", instance.get_device_proc_addr, device),
                 .destroy_pipeline_layout = load("vkDestroyPipelineLayout", instance.get_device_proc_addr, device),
+                .create_pipeline_cache = load("vkCreatePipelineCache", instance.get_device_proc_addr, device),
+                .destroy_pipeline_cache = load("vkDestroyPipelineCache", instance.get_device_proc_addr, device),
+                .get_pipeline_cache_data = load("vkGetPipelineCacheData", instance.get_device_proc_addr, device),
                 .create_compute_pipelines = load("vkCreateComputePipelines", instance.get_device_proc_addr, device),
                 .destroy_pipeline = load("vkDestroyPipeline", instance.get_device_proc_addr, device),
             },
@@ -257,42 +264,42 @@ const Device = struct {
     }
 };
 
-const Context = struct {
-    const Self = @This();
-    const max_stack_physical_devices = 4;
-    const max_stack_queue_families = 8;
+fn Context(comptime max_stack_physical_devices: usize, comptime max_stack_queue_families: usize) type {
+    return struct {
+        const Self = @This();
 
-    entry: Entry,
-    instance: Instance,
-    device: Device,
+        entry: Entry,
+        instance: Instance,
+        device: Device,
 
-    fn init(allocator: std.mem.Allocator) !Self {
-        var entry = try Entry.init();
-        const instance = try Instance.init(entry, null);
+        fn init(allocator: std.mem.Allocator) !Self {
+            var entry = try Entry.init();
+            const instance = try Instance.init(entry, null);
 
-        var phyical_devices_stack_fallback = std.heap.stackFallback(max_stack_physical_devices * @sizeOf(c.VkPhysicalDevice), allocator);
-        const phyical_devices_stack_fallback_allocator = phyical_devices_stack_fallback.get();
-        const physical_devices = try instance.get_physical_devices(phyical_devices_stack_fallback_allocator);
-        defer phyical_devices_stack_fallback_allocator.free(physical_devices);
+            var phyical_devices_stack_fallback = std.heap.stackFallback(max_stack_physical_devices * @sizeOf(c.VkPhysicalDevice), allocator);
+            const phyical_devices_stack_fallback_allocator = phyical_devices_stack_fallback.get();
+            const physical_devices = try instance.get_physical_devices(phyical_devices_stack_fallback_allocator);
+            defer phyical_devices_stack_fallback_allocator.free(physical_devices);
 
-        var queue_family_properties_stack_fallback = std.heap.stackFallback(max_stack_queue_families * @sizeOf(c.VkQueueFamilyProperties), allocator);
-        const queue_family_properties_stack_fallback_allocator = queue_family_properties_stack_fallback.get();
-        const queue_family = (try instance.select_queue_family(physical_devices, queue_family_properties_stack_fallback_allocator, c.VK_QUEUE_COMPUTE_BIT)) orelse return error.NoSuitableQueueFamily;
+            var queue_family_properties_stack_fallback = std.heap.stackFallback(max_stack_queue_families * @sizeOf(c.VkQueueFamilyProperties), allocator);
+            const queue_family_properties_stack_fallback_allocator = queue_family_properties_stack_fallback.get();
+            const queue_family = (try instance.select_queue_family(physical_devices, queue_family_properties_stack_fallback_allocator, c.VK_QUEUE_COMPUTE_BIT)) orelse return error.NoSuitableQueueFamily;
 
-        const device = try Device.init(instance, queue_family, null);
-        return .{
-            .entry = entry,
-            .instance = instance,
-            .device = device,
-        };
-    }
+            const device = try Device.init(instance, queue_family, null);
+            return .{
+                .entry = entry,
+                .instance = instance,
+                .device = device,
+            };
+        }
 
-    fn deinit(self: *Self) void {
-        self.device.deinit();
-        self.instance.deinit();
-        self.entry.deinit();
-    }
-};
+        fn deinit(self: *Self) void {
+            self.device.deinit();
+            self.instance.deinit();
+            self.entry.deinit();
+        }
+    };
+}
 
 const ShaderModule = struct {
     const Self = @This();
@@ -361,38 +368,96 @@ const PipelineLayout = struct {
     }
 };
 
-// const ComputePipeline = struct {
-//     const Self = @This();
+const ComputePipelines = struct {
+    const Self = @This();
 
-//     device: Device,
-//     allocation_callbacks: ?*c.VkAllocationCallbacks,
+    device: Device,
+    allocation_callbacks: ?*c.VkAllocationCallbacks,
+    allocator: std.mem.Allocator,
 
-//     handle: c.VkPipeline,
+    handles: []c.VkPipeline,
 
-//     fn init(device: Device, allocator: std.mem.Allocator, shader_modules: []ShaderModule, allocation_callbacks: ?*c.VkAllocationCallbacks) ![]Self {
-//         const shader_stage = c.VkPipelineShaderStageCreateInfo{
-//             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-//             .flags = 0,
-//             .stage = c.VK_SHADER_STAGE_COMPUTE_BIT,
-//             .module = shader_module.handle,
-//             .pName = "main",
-//             .pSpecializationInfo = null,
-//         };
-//         const infos = allocator.alloc(c.VkComputePipelineCreateInfo, shader_modules.len);
-//         defer allocator.free(infos);
-//         return switch(device.create_compute_pipelines(device.handle, null, infos.len, &infos, allocation_callbacks, &pipelines)) {
-//             c.VK_SUCCESS => .{
-//                 .device = device,
-//                 .allocation_callbacks = allocation_callbacks,
-//                 .
-//             }
-//         };
-//     }
+    fn init(device: Device, infos: []const c.VkComputePipelineCreateInfo, allocator: std.mem.Allocator, allocation_callbacks: ?*c.VkAllocationCallbacks) !ComputePipelines {
+        var pipelines = try allocator.alloc(c.VkPipeline, infos.len);
+        return switch (device.create_compute_pipelines(device.handle, null, @intCast(u32, infos.len), infos.ptr, allocation_callbacks, pipelines.ptr)) {
+            c.VK_SUCCESS => .{
+                .device = device,
+                .allocation_callbacks = allocation_callbacks,
+                .allocator = allocator,
+                .handles = pipelines,
+            },
+            else => unreachable,
+        };
+    }
 
-//     fn deinit(self: Self) void {
-//         self.device.destroy_pipeline(self.device.handle, self.handle, self.allocation_callbacks);
-//     }
-// };
+    fn deinit(self: Self) void {
+        for (self.handles) |handle| self.device.destroy_pipeline(self.device.handle, handle, self.allocation_callbacks);
+        self.allocator.free(self.handles);
+    }
+};
+
+const PipelineCache = struct {
+    const Self = @This();
+
+    device: Device,
+    allocation_callbacks: ?*c.VkAllocationCallbacks,
+
+    handle: c.VkPipelineCache,
+
+    fn init(device: Device, data: []u8, allocation_callbacks: ?*c.VkAllocationCallbacks) !Self {
+        const info = c.VkPipelineCacheCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .initialDataSize = data.len,
+            .pInitialData = data.ptr,
+        };
+        var pipeline_cache: c.VkPipelineCache = undefined;
+        return switch (device.create_pipeline_cache(device.handle, &info, allocation_callbacks, &pipeline_cache)) {
+            c.VK_SUCCESS => .{
+                .device = device,
+                .allocation_callbacks = allocation_callbacks,
+                .handle = pipeline_cache,
+            },
+            else => unreachable,
+        };
+    }
+
+    fn deinit(self: Self) void {
+        self.device.destroy_pipeline_cache(self.device.handle, self.handle, self.allocation_callbacks);
+    }
+
+    fn get_data(self: Self, allocator: std.mem.Allocator) ![]u8 {
+        var size: usize = undefined;
+        try switch (self.device.get_pipeline_cache_data(self.device.handle, self.handle, &size, null)) {
+            c.VK_SUCCESS => {},
+            c.VK_ERROR_OUT_OF_HOST_MEMORY => error.OutOfHostMemory,
+            else => unreachable,
+        };
+        const data = try allocator.alloc(u8, size);
+        return switch (self.device.get_pipeline_cache_data(self.device.handle, self.handle, &size, data.ptr)) {
+            c.VK_SUCCESS => data,
+            else => unreachable,
+        };
+    }
+};
+
+fn read_file_contents(sub_path: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    const file = try std.fs.cwd().openFile(sub_path, .{});
+    defer file.close();
+    const metadata = try file.metadata();
+    if (metadata.kind() == .File) {
+        return file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    } else {
+        return error.WrongFileType;
+    }
+}
+
+fn write_file_contents(sub_path: []const u8, data: []u8) !void {
+    const file = try std.fs.cwd().createFile(sub_path, .{});
+    defer file.close();
+    try file.writeAll(data);
+}
 
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{
@@ -401,7 +466,7 @@ pub fn main() !void {
     defer std.debug.assert(general_purpose_allocator.deinit() == .ok);
     const allocator = general_purpose_allocator.allocator();
 
-    var context = try Context.init(allocator);
+    var context = try Context(4, 8).init(allocator);
     defer context.deinit();
 
     const pipeline_layout = try PipelineLayout.init(context.device, null);
@@ -409,4 +474,39 @@ pub fn main() !void {
 
     const shader_module = try ShaderModule.init(context.device, null, shader[0..]);
     defer shader_module.deinit();
+
+    const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{.{
+        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .stage = c.VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = shader_module.handle,
+        .pName = "main",
+        .pSpecializationInfo = null,
+    }};
+
+    const infos = [_]c.VkComputePipelineCreateInfo{.{
+        .sType = c.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .stage = shader_stages[0],
+        .layout = pipeline_layout.handle,
+        .basePipelineHandle = null,
+        .basePipelineIndex = 0,
+    }};
+
+    var data: []u8 = read_file_contents("pipeline_cache.bin", allocator) catch &.{};
+    defer if (data.len > 0) allocator.free(data);
+
+    const pipeline_cache = try PipelineCache.init(context.device, data, null);
+    defer {
+        if (pipeline_cache.get_data(allocator)) |bytes| {
+            write_file_contents("pipeline_cache.bin", bytes) catch {};
+            allocator.free(bytes);
+        } else |_| {}
+        pipeline_cache.deinit();
+    }
+
+    const compute_pipelines = try ComputePipelines.init(context.device, infos[0..], allocator, null);
+    defer compute_pipelines.deinit();
 }
